@@ -1,72 +1,37 @@
-// Importing dependencies from Redux Toolkit and Axios
 import { createSlice, createAsyncThunk } from "@reduxjs/toolkit";
 import axios from "axios";
+import { db } from "../firebase";
+import { collection, addDoc, getDocs, updateDoc, deleteDoc, doc, query, where } from "firebase/firestore";
 
-// Initialize savedTasks from localStorage for persistent task data
-let savedTasks = [];
-try {
-  // Retrieve tasks from localStorage
-  const tasksJson = localStorage.getItem("tasks");
-  // Parse JSON string to array, default to empty array if null
-  savedTasks = tasksJson ? JSON.parse(tasksJson) : [];
-  // Ensure savedTasks is an array, reset to empty array if not
-  if (!Array.isArray(savedTasks)) savedTasks = [];
-} catch (e) {
-  // Log error if parsing fails and default to empty array
-  console.error("Failed to parse tasks:", e);
-  savedTasks = [];
-}
-
-// Initialize authentication status from localStorage
-let savedIsAuthenticated = false;
-try {
-  // Retrieve authentication status from localStorage
-  const authJson = localStorage.getItem("isAuthenticated");
-  // Parse JSON to boolean, default to false if null
-  savedIsAuthenticated = authJson ? JSON.parse(authJson) : false;
-} catch (e) {
-  // Log error if parsing fails and default to false
-  console.error("Failed to parse authentication status:", e);
-  savedIsAuthenticated = false;
-}
-
-// Define an async thunk to fetch weather data based on user's location
+// Async thunk to fetch weather data based on user's location
 export const fetchWeather = createAsyncThunk(
-  "weather/fetchWeather", // Unique action type string
+  "weather/fetchWeather",
   async (_, { rejectWithValue }) => {
     try {
-      // Get user's geolocation asynchronously
       const position = await new Promise((resolve, reject) => {
         navigator.geolocation.getCurrentPosition(resolve, reject);
       });
 
-      // Extract latitude and longitude from position
       const { latitude, longitude } = position.coords;
-
-      // Fetch weather data from OpenWeatherMap API using coordinates
       const response = await axios.get(
         `https://api.openweathermap.org/data/2.5/weather?lat=${latitude}&lon=${longitude}&appid=6cb562664f9fac9ad447922c6de72fc3&units=metric`
       );
 
-      // Return structured weather data
       return {
-        city: response.data.name, // City name from API response
-        temp_c: response.data.main.temp, // Temperature in Celsius
-        feelslike_c: response.data.main.feels_like, // Feels-like temperature
+        city: response.data.name,
+        temp_c: response.data.main.temp,
+        feelslike_c: response.data.main.feels_like,
         condition: {
-          text: response.data.weather[0].description, // Weather description
-          icon: `http://openweathermap.org/img/wn/${response.data.weather[0].icon}@2x.png`, // Weather icon URL
+          text: response.data.weather[0].description,
+          icon: `http://openweathermap.org/img/wn/${response.data.weather[0].icon}@2x.png`,
         },
       };
     } catch (error) {
-      // Log initial weather fetch error
       console.error("Weather fetch error:", error);
       try {
-        // Fallback to London weather if geolocation fails
         const fallbackResponse = await axios.get(
           "https://api.openweathermap.org/data/2.5/weather?q=London,uk&appid=6cb562664f9fac9ad447922c6de72fc3&units=metric"
         );
-        // Return structured weather data for London
         return {
           city: "London",
           temp_c: fallbackResponse.data.main.temp,
@@ -77,89 +42,128 @@ export const fetchWeather = createAsyncThunk(
           },
         };
       } catch (fallbackError) {
-        // Reject with error message if both attempts fail
         return rejectWithValue(error.message || "Failed to fetch weather data");
       }
     }
   }
 );
 
-// Create a Redux slice to manage tasks and weather state
+export const fetchTasks = createAsyncThunk("tasks/fetchTasks", async (_, { getState }) => {
+  const state = getState();
+  if (!state.user) return [];
+  const q = query(collection(db, "tasks"), where("userId", "==", state.user.uid));
+  const querySnapshot = await getDocs(q);
+  const tasks = [];
+  querySnapshot.forEach((doc) => {
+    tasks.push({ id: doc.id, ...doc.data() });
+  });
+  return tasks.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+});
+
+export const addTask = createAsyncThunk("tasks/addTask", async (text, { getState }) => {
+  const state = getState();
+  const userId = state.user?.uid;
+  const taskData = {
+    text,
+    completed: false,
+    createdAt: new Date().toISOString(),
+    priority: "none",
+    userId,
+  };
+  const docRef = await addDoc(collection(db, "tasks"), taskData);
+  return { id: docRef.id, ...taskData };
+});
+
+export const toggleTask = createAsyncThunk("tasks/toggleTask", async (taskId, { getState }) => {
+  const state = getState();
+  const task = state.tasks.find((t) => t.id === taskId);
+  if (!task) throw new Error("Task not found");
+  
+  const taskRef = doc(db, "tasks", taskId);
+  await updateDoc(taskRef, { completed: !task.completed });
+  return taskId;
+});
+
+export const deleteTask = createAsyncThunk("tasks/deleteTask", async (taskId) => {
+  const taskRef = doc(db, "tasks", taskId);
+  await deleteDoc(taskRef);
+  return taskId;
+});
+
+export const setPriority = createAsyncThunk("tasks/setPriority", async ({ taskId, priority }) => {
+  const taskRef = doc(db, "tasks", taskId);
+  await updateDoc(taskRef, { priority });
+  return { taskId, priority };
+});
+
 const taskSlice = createSlice({
-  name: "tasks", // Slice name for identification
+  name: "tasks",
   initialState: {
-    tasks: savedTasks, // Array of tasks loaded from localStorage
-    weather: null, // Weather data object, initially null
-    city: null, // City name, initially null
-    isAuthenticated: savedIsAuthenticated, // Authentication status from localStorage
-    isLoading: false, // Loading state for async operations
-    error: null, // Error message for failed operations
+    tasks: [],
+    weather: null,
+    city: null,
+    user: null,
+    isAuthenticated: false,
+    isLoading: false,
+    error: null,
   },
   reducers: {
-    // Reducer to add a new task
-    addTask: (state, action) => {
-      state.tasks.push({
-        id: Date.now(), // Unique ID based on timestamp
-        text: action.payload, // Task description from action payload
-        completed: false, // Initial completion status
-        createdAt: new Date().toISOString(), // Creation timestamp
-        priority: "none", // Default priority
-      });
-    },
-    // Reducer to toggle a task's completion status
-    toggleTask: (state, action) => {
-      const task = state.tasks.find((task) => task.id === action.payload);
-      if (task) task.completed = !task.completed; // Flip completion status if task exists
-    },
-    // Reducer to delete a task
-    deleteTask: (state, action) => {
-      state.tasks = state.tasks.filter((task) => task.id !== action.payload); // Remove task by ID
-    },
-    // Reducer to set a task's priority
-    setPriority: (state, action) => {
-      const { taskId, priority } = action.payload;
-      const task = state.tasks.find((task) => task.id === taskId);
-      if (task) task.priority = priority;
-    },
-    // Reducer to log in (set authenticated state)
-    login: (state) => {
-      state.isAuthenticated = true;
-    },
-    // Reducer to log out (clear tasks and authentication)
-    logout: (state) => {
+    setUserLoggedOut: (state) => {
+      state.user = null;
       state.isAuthenticated = false;
-      state.tasks = []; // Clear all tasks on logout
+      state.tasks = [];
+    },
+    setUserLoggedIn: (state, action) => {
+      state.user = action.payload;
+      state.isAuthenticated = true;
     },
   },
   extraReducers: (builder) => {
-    // Handle async weather fetch states
     builder
-      // When weather fetch is pending
+      // Weather
       .addCase(fetchWeather.pending, (state) => {
-        state.isLoading = true; // Indicate loading state
-        state.error = null; // Clear any previous errors
+        state.isLoading = true;
+        state.error = null;
       })
-      // When weather fetch succeeds
       .addCase(fetchWeather.fulfilled, (state, action) => {
         state.weather = {
           temp_c: action.payload.temp_c,
           feelslike_c: action.payload.feelslike_c,
           condition: action.payload.condition,
-        }; // Update weather data
-        state.city = action.payload.city; // Update city name
-        state.isLoading = false; // Reset loading state
+        };
+        state.city = action.payload.city;
+        state.isLoading = false;
       })
-      // When weather fetch fails
       .addCase(fetchWeather.rejected, (state, action) => {
-        state.isLoading = false; // Reset loading state
-        state.error = action.payload || "Failed to fetch weather"; // Set error message
+        state.isLoading = false;
+        state.error = action.payload || "Failed to fetch weather";
+      })
+      // Fetch Tasks
+      .addCase(fetchTasks.fulfilled, (state, action) => {
+        state.tasks = action.payload;
+      })
+      // Add Task
+      .addCase(addTask.fulfilled, (state, action) => {
+        state.tasks.push(action.payload);
+      })
+      // Toggle Task
+      .addCase(toggleTask.fulfilled, (state, action) => {
+        const task = state.tasks.find((task) => task.id === action.payload);
+        if (task) task.completed = !task.completed;
+      })
+      // Delete Task
+      .addCase(deleteTask.fulfilled, (state, action) => {
+        state.tasks = state.tasks.filter((task) => task.id !== action.payload);
+      })
+      // Set Priority
+      .addCase(setPriority.fulfilled, (state, action) => {
+        const { taskId, priority } = action.payload;
+        const task = state.tasks.find((task) => task.id === taskId);
+        if (task) task.priority = priority;
       });
   },
 });
 
-// Export action creators for use in components
-export const { addTask, toggleTask, deleteTask, setPriority, login, logout } =
-  taskSlice.actions;
+export const { setUserLoggedOut, setUserLoggedIn } = taskSlice.actions;
 
-// Export the reducer to be included in the Redux store
 export default taskSlice.reducer;
